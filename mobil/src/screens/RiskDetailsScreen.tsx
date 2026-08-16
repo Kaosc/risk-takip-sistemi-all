@@ -1,0 +1,987 @@
+import { useEffect, useRef, useState } from "react"
+import { Alert, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from "react-native"
+import { useSelector } from "react-redux"
+import { Image } from "expo-image"
+import * as ImagePicker from "expo-image-picker"
+import BottomSheet from "@gorhom/bottom-sheet"
+import DateTimePicker from "@react-native-community/datetimepicker"
+import { NavigationProp, useNavigation } from "@react-navigation/native"
+
+import ThemedText from "../components/ui/ThemedText"
+import ThemedButton from "../components/ui/ThemedButton"
+import ThemedIcon from "../components/ui/ThemedIcon"
+import ThemedBottomSheet from "../components/ui/ThemedBottomSheet"
+import CustomHeader from "../components/CustomHeader"
+import FullScreenModal from "../components/FullScreenModal"
+
+import { safeTimestampToDateString } from "../utils/date"
+import { AllIconNames } from "../types/icon"
+import { Theme } from "../utils/theme"
+import { getStaffs } from "../lib/firebase/firestore/users"
+import { assignRiskToStaff, deleteRiskById, getRiskById, updateRisk, updateStatus } from "../lib/firebase/firestore/risks"
+import { uploadImages } from "../lib/firebase/storage"
+import { serverTimestamp } from "@react-native-firebase/firestore"
+import { useTranslation } from "react-i18next"
+
+const fallbackRisk: Risk = {
+	id: "",
+	type: "Risk",
+	category: "-",
+	location: "-",
+	description: "",
+	severity: "Medium",
+	images: [],
+	createdBy: "",
+	createdAt: undefined,
+	updatedAt: undefined,
+	status: "new",
+} as unknown as Risk
+
+type SelectFieldProps = {
+	label: string
+	value?: string
+	placeholder?: string
+	onPress: () => void
+}
+
+function SelectField({ label, value, placeholder, onPress }: SelectFieldProps) {
+	const darkMode = useSelector((state: RootState) => state.settings.darkMode)
+	const styles = createStyles(darkMode)
+
+	return (
+		<View style={styles.fieldContainer}>
+			<ThemedText style={styles.fieldLabel}>{label}</ThemedText>
+			<TouchableOpacity
+				style={styles.selectField}
+				onPress={onPress}
+				activeOpacity={0.7}
+			>
+				<ThemedText
+					style={[styles.selectValue, !value && styles.selectPlaceholder]}
+					numberOfLines={1}
+				>
+					{value || placeholder || "Seçiniz"}
+				</ThemedText>
+				<ThemedIcon
+					name="chevron-down"
+					size={22}
+				/>
+			</TouchableOpacity>
+		</View>
+	)
+}
+
+function DetailRow({ icon, label, value }: { icon: AllIconNames; label: string; value?: string }) {
+	const darkMode = useSelector((state: RootState) => state.settings.darkMode)
+	const styles = createStyles(darkMode)
+
+	return (
+		<View style={styles.detailRow}>
+			<ThemedIcon
+				name={icon}
+				size={18}
+			/>
+			<ThemedText style={styles.detailLabel}>{label}</ThemedText>
+			<ThemedText style={styles.detailValue}>{value || "-"}</ThemedText>
+		</View>
+	)
+}
+
+function ThumbnailsRow({
+	images,
+	onRemove,
+	onPress,
+}: {
+	images: string[]
+	onRemove?: (index: number) => void
+	onPress?: (uri: string) => void
+}) {
+	const darkMode = useSelector((state: RootState) => state.settings.darkMode)
+	const styles = createStyles(darkMode)
+
+	if (images.length === 0) return null
+
+	return (
+		<ScrollView
+			horizontal
+			showsHorizontalScrollIndicator={false}
+			style={styles.imageList}
+		>
+			{images.map((uri, index) => (
+				<TouchableOpacity
+					key={`${index}-${uri}`}
+					style={styles.thumbWrap}
+					activeOpacity={0.7}
+					disabled={!onPress}
+					onPress={onPress ? () => onPress(uri) : undefined}
+				>
+					<Image
+						source={{ uri }}
+						style={styles.thumbnail}
+						contentFit="cover"
+					/>
+					{onRemove && (
+						<TouchableOpacity
+							style={styles.thumbRemove}
+							onPress={() => onRemove(index)}
+							activeOpacity={0.8}
+						>
+							<ThemedIcon
+								name="close"
+								size={14}
+							/>
+						</TouchableOpacity>
+					)}
+				</TouchableOpacity>
+			))}
+		</ScrollView>
+	)
+}
+
+const riskProgressSteps: {
+	status: RiskStatus
+	title: string
+	desc: string
+	icon: AllIconNames
+}[] = [
+	{
+		status: "new",
+		title: "Yeni",
+		desc: "Risk bildirimi oluşturuldu, değerlendirme bekleniyor.",
+		icon: "alert-outline",
+	},
+	{
+		status: "inprogress",
+		title: "Süreçte",
+		desc: "Görev personele atandı, çözüm çalışması devam ediyor.",
+		icon: "progress-clock",
+	},
+	{
+		status: "pending",
+		title: "Onay Bekliyor",
+		desc: "Yapılan işlemler onay için inceleniyor.",
+		icon: "clock-outline",
+	},
+	{
+		status: "completed",
+		title: "Tamamlandı",
+		desc: "Risk kapatıldı ve işlemler onaylandı.",
+		icon: "check-circle-outline",
+	},
+]
+
+function RiskProgressCard({ status }: { status: RiskStatus }) {
+	const darkMode = useSelector((state: RootState) => state.settings.darkMode)
+	const styles = createStyles(darkMode)
+	const theme = Theme[darkMode ? "dark" : "light"]
+	const currentIndex = riskProgressSteps.findIndex((s) => s.status === status)
+
+	const colors = {
+		new: theme.primary,
+		inprogress: theme.blue,
+		pending: theme.orange,
+		completed: theme.green,
+	}
+
+	return (
+		<View style={styles.card}>
+			<ThemedText style={styles.sectionTitle}>Durum Takibi</ThemedText>
+			<View style={styles.timeline}>
+				{riskProgressSteps.map((step, index) => {
+					const reached = index <= currentIndex
+
+					return (
+						<View
+							key={step.status}
+							style={styles.timelineItem}
+						>
+							<View style={styles.timelineRail}>
+								<View
+									style={[
+										styles.timelineDot,
+										reached && {
+											backgroundColor: colors[step.status].bg,
+											borderColor: colors[step.status].fg,
+										},
+										!reached && styles.timelineDotInactive,
+									]}
+								>
+									<ThemedIcon
+										name={step.icon}
+										size={16}
+										color={reached ? colors[step.status].fg : darkMode ? "#888" : "#999"}
+									/>
+								</View>
+								{index < riskProgressSteps.length - 1 && (
+									<View
+										style={[
+											styles.timelineLine,
+											{
+												backgroundColor: reached ? colors[step.status].fg : theme.border,
+											},
+											!reached && styles.timelineLineInactive,
+										]}
+									/>
+								)}
+							</View>
+
+							<View style={[styles.timelineContent, !reached && styles.timelineContentInactive]}>
+								<ThemedText style={styles.timelineTitle}>{step.title}</ThemedText>
+								<ThemedText style={styles.timelineDesc}>{step.desc}</ThemedText>
+							</View>
+						</View>
+					)
+				})}
+			</View>
+		</View>
+	)
+}
+
+export default function RiskDetailsScreen({
+	route,
+}: {
+	route: {
+		params: { riskId?: string; risk?: Risk }
+	}
+}) {
+	const { role } = useSelector((state: RootState) => state.auth)
+	const navigation = useNavigation() as NavigationProp<any>
+	const { t } = useTranslation()
+
+	const darkMode = useSelector((state: RootState) => state.settings.darkMode)
+	const theme = Theme[darkMode ? "dark" : "light"]
+	const styles = createStyles(darkMode)
+
+	const [risk, setRisk] = useState<Risk>(route?.params?.risk ?? fallbackRisk)
+	const [assignedStaff, setAssignedStaff] = useState<{ uid: string; name: string } | null>(null)
+	const taskDescriptionRef = useRef("")
+	const [dueDate, setDueDate] = useState<Date | null>(null)
+	const [showDatePicker, setShowDatePicker] = useState(false)
+	const [isAssigning, setIsAssigning] = useState(false)
+	const completionNotesRef = useRef("")
+	const [afterImages, setAfterImages] = useState<string[]>([])
+	const [pickerError, setPickerError] = useState("")
+	const [isPicking, setIsPicking] = useState(false)
+	const [sheetItems, setSheetItems] = useState<{ text: string; icon: AllIconNames; onPress: () => void }[]>([])
+	const [loading, setLoading] = useState(false)
+	const [viewerImage, setViewerImage] = useState<string | null>(null)
+
+	const sheetRef = useRef<BottomSheet | null>(null)
+
+	const setStatus = (status: RiskStatus) => setRisk((prev) => ({ ...prev, status }))
+
+	const fetchRiskDetails = async (riskId: string) => {
+		setLoading(true)
+		const fetchedRisk = await getRiskById(riskId)
+
+		if (fetchedRisk) {
+			setRisk(fetchedRisk)
+		}
+
+		setLoading(false)
+	}
+
+	useEffect(() => {
+		if (route.params?.riskId) {
+			fetchRiskDetails(route.params.riskId)
+		}
+	}, [route.params?.riskId])
+
+	const fetchStaffs = async () => {
+		if (role === "ADMIN") {
+			const fetchedStaffs = await getStaffs()
+			if (fetchedStaffs.length > 0) {
+				setSheetItems(
+					fetchedStaffs.map((staff) => ({
+						text: staff.name,
+						icon: "account-check-outline" as AllIconNames,
+						onPress: () => {
+							setAssignedStaff({
+								uid: staff.uid,
+								name: staff.name,
+							})
+							sheetRef.current?.close()
+						},
+					})),
+				)
+			} else {
+				toast.show("kayıtlı personel bulunamadı.", { type: "warning" })
+			}
+		}
+	}
+
+	useEffect(() => {
+		fetchStaffs()
+	}, [role])
+
+	//////////////////////////// ADMIN ////////////////////////////
+
+	const handleAssign = async () => {
+		if (!assignedStaff) {
+			Alert.alert("Uyarı", "Lütfen görev atanacak personeli seçin.")
+			return
+		}
+		const description = taskDescriptionRef.current.trim()
+		if (!description) {
+			Alert.alert("Uyarı", "Lütfen görev açıklaması girin.")
+			return
+		}
+
+		setIsAssigning(true)
+
+		try {
+			const assignResult = await assignRiskToStaff(risk.id, description, dueDate, assignedStaff?.uid)
+			const nextStatus = "inprogress"
+
+			if (!assignResult.success) {
+				Alert.alert("Hata", "Görev atanamadı. Lütfen tekrar deneyin.")
+				return
+			}
+
+			const statusResult = await updateStatus(risk.id, nextStatus)
+
+			if (!statusResult.success) {
+				Alert.alert("Hata", "Görev atandı fakat durum güncellenemedi. Durumu manuel kontrol edin.")
+				return
+			}
+
+			setRisk((prev) => ({
+				...prev,
+				assignedToId: assignedStaff?.uid,
+				taskDescription: description,
+				dueDate: (dueDate ?? undefined) as FirebaseTimestamp | undefined,
+				status: nextStatus,
+			}))
+
+			Alert.alert("Başarılı", "Görev atandı ve risk takibe alındı.")
+		} catch (e: any) {
+			Alert.alert("Hata", e?.message || "Beklenmeyen bir hata oluştu.")
+		} finally {
+			setIsAssigning(false)
+		}
+	}
+
+	const handleClose = async () => {
+		await updateStatus(risk.id, "completed")
+		setStatus("completed")
+	}
+
+	//////////////////////////// STAFF ////////////////////////////
+
+	const addAfterImages = (uris: string[]) => setAfterImages((prev) => [...prev, ...uris])
+
+	const takeAfterPhoto = async () => {
+		const permission = await ImagePicker.requestCameraPermissionsAsync()
+		if (!permission.granted) {
+			setPickerError("Kamera izni verilmedi. Ayarlardan izin verin.")
+			return
+		}
+		setPickerError("")
+		setIsPicking(true)
+		try {
+			const result = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 0.7 })
+			if (!result.canceled && result.assets && result.assets.length > 0) {
+				addAfterImages(result.assets.map((a) => a.uri))
+			}
+		} catch (e: any) {
+			setPickerError(e?.message || "Fotoğraf çekilirken bir hata oluştu.")
+		} finally {
+			setIsPicking(false)
+		}
+	}
+
+	const pickAfterGallery = async () => {
+		const permission = await ImagePicker.requestMediaLibraryPermissionsAsync()
+		if (!permission.granted) {
+			setPickerError("Galeri izni verilmedi. Ayarlardan izin verin.")
+			return
+		}
+		setPickerError("")
+		setIsPicking(true)
+		try {
+			const result = await ImagePicker.launchImageLibraryAsync({
+				mediaTypes: ["images"],
+				allowsMultipleSelection: true,
+				quality: 0.7,
+			})
+			if (!result.canceled && result.assets && result.assets.length > 0) {
+				addAfterImages(result.assets.map((a) => a.uri))
+			}
+		} catch (e: any) {
+			setPickerError(e?.message || "Görsel seçilirken bir hata oluştu.")
+		} finally {
+			setIsPicking(false)
+		}
+	}
+
+	const handleCompleteTask = async () => {
+		const notes = completionNotesRef.current.trim()
+		if (!notes) {
+			Alert.alert("Uyarı", "Lütfen tamamlanma notunu girin.")
+			return
+		}
+
+		setLoading(true)
+
+		try {
+			const status = "pending"
+
+			const res = await updateRisk(risk.id, {
+				status: status,
+				completionNotes: notes,
+				afterImages,
+			})
+
+			// TODO: If the image load fails than what?
+			if (afterImages.length > 0) {
+				const uploadResult = await uploadImages(afterImages, `risks/${risk.id}`)
+
+				if (!uploadResult.success || !uploadResult.urls) {
+					Alert.alert("Kayıt Gönderilmedi", "Görseller yüklenemedi. Lütfen tekrar deneyin.")
+					return
+				}
+
+				await updateRisk(risk.id, {
+					afterImages: uploadResult.urls,
+					completedAt: serverTimestamp() as unknown as FirebaseTimestamp,
+				})
+			}
+
+			if (!res.success) {
+				Alert.alert("Kayıt Gönderilmedi", "Risk kaydı oluşturulamadı. Lütfen tekrar deneyin.")
+				return
+			}
+
+			setRisk((prev) => ({
+				...prev,
+				status: status,
+				completionNotes: notes,
+				afterImages,
+			}))
+		} finally {
+			setLoading(false)
+		}
+	}
+	//////////////////////////// ROLE SECTION ////////////////////////////
+
+	const RenderRoleSection = () => {
+		if (risk.status === "new" && role === "ADMIN") {
+			return (
+				<View style={styles.card}>
+					<ThemedText style={styles.sectionTitle}>Görev Atama</ThemedText>
+					<ThemedText style={styles.sectionHint}>Bu bildirimi değerlendirip bir personele görev atayın.</ThemedText>
+
+					<SelectField
+						label="Personel"
+						value={assignedStaff?.name || ""}
+						placeholder="Personel seçin"
+						onPress={() => sheetRef.current?.expand()}
+					/>
+
+					<ThemedText style={styles.fieldLabel}>Görev Açıklaması</ThemedText>
+					<TextInput
+						style={styles.input}
+						placeholder="Yapılacak işi kısaca açıklayın..."
+						placeholderTextColor="#888"
+						onChangeText={(text) => {
+							taskDescriptionRef.current = text
+						}}
+					/>
+
+					<ThemedText style={styles.fieldLabel}>Bitiş Tarihi (Termin)</ThemedText>
+					<TouchableOpacity
+						style={styles.selectField}
+						onPress={() => setShowDatePicker(true)}
+						activeOpacity={0.7}
+					>
+						<ThemedText
+							style={[styles.selectValue, !dueDate && styles.selectPlaceholder]}
+							numberOfLines={1}
+						>
+							{dueDate ? dueDate.toLocaleDateString("tr-TR") : "Tarih seçin"}
+						</ThemedText>
+						<ThemedIcon
+							name="calendar-outline"
+							size={22}
+						/>
+					</TouchableOpacity>
+
+					{showDatePicker && (
+						<DateTimePicker
+							value={dueDate ?? new Date()}
+							mode="date"
+							display="default"
+							minimumDate={new Date()}
+							onChange={(event, selectedDate) => {
+								if (Platform.OS === "android") setShowDatePicker(false)
+								if (selectedDate) setDueDate(selectedDate)
+							}}
+						/>
+					)}
+
+					<ThemedButton
+						text="Görevi Ata"
+						icon="account-check-outline"
+						onPress={handleAssign}
+						disabled={isAssigning}
+						style={{ marginVertical: 12, backgroundColor: theme.green.bg, borderColor: theme.green.fg, borderWidth: 1 }}
+						iconColor={theme.green.fg}
+						textStyle={{ color: theme.green.fg }}
+					/>
+				</View>
+			)
+		}
+
+		if (risk.status === "inprogress" && role === "ADMIN") {
+			return (
+				<View
+					style={[
+						styles.card,
+						{
+							backgroundColor: theme.blue.bg,
+							borderColor: theme.blue.fg,
+							borderWidth: 1,
+						},
+					]}
+				>
+					<ThemedText style={styles.sectionTitle}>Görev Devam Ediyor</ThemedText>
+					<ThemedText style={styles.sectionHint}>Bu görev personel'e atandı ve çalışma sürecinde.</ThemedText>
+				</View>
+			)
+		}
+
+		if (risk.status === "inprogress" && role === "STAFF") {
+			return (
+				<View style={styles.card}>
+					<ThemedText style={styles.sectionTitle}>Görevi Tamamla</ThemedText>
+
+					<ThemedText style={styles.fieldLabel}>Sonrası Görselleri</ThemedText>
+					<View style={styles.imageButtonsRow}>
+						<ThemedButton
+							text="Kamera"
+							icon="camera"
+							iconSize={20}
+							onPress={takeAfterPhoto}
+							disabled={isPicking}
+							style={styles.imageButton}
+						/>
+						<ThemedButton
+							text="Galeri"
+							icon="image-multiple-outline"
+							iconSize={20}
+							onPress={pickAfterGallery}
+							disabled={isPicking}
+							style={styles.imageButton}
+						/>
+					</View>
+
+					{pickerError ? <ThemedText style={styles.errorText}>{pickerError}</ThemedText> : null}
+
+					<ThumbnailsRow
+						images={afterImages}
+						onRemove={(index) => setAfterImages((prev) => prev.filter((_, i) => i !== index))}
+						onPress={setViewerImage}
+					/>
+
+					<ThemedText style={styles.fieldLabel}>Tamamlanma Notu</ThemedText>
+					<TextInput
+						style={styles.textArea}
+						placeholder="Yapılan işlemleri açıklayın..."
+						placeholderTextColor="#888"
+						multiline
+						numberOfLines={4}
+						textAlignVertical="top"
+						onChangeText={(text) => {
+							completionNotesRef.current = text
+						}}
+					/>
+
+					<ThemedButton
+						text="Gönder ve Tamamla"
+						icon="check"
+						onPress={handleCompleteTask}
+						style={{ marginVertical: 12, backgroundColor: theme.green.bg, borderColor: theme.green.fg, borderWidth: 1 }}
+						iconColor={theme.green.fg}
+						textStyle={{ color: theme.green.fg }}
+					/>
+				</View>
+			)
+		}
+
+		if (risk.status === "pending") {
+			return (
+				<View style={[styles.card, { backgroundColor: theme.orange.bg, borderColor: theme.orange.fg, borderWidth: 1 }]}>
+					<ThemedText style={styles.sectionTitle}>Çalışma Tamamlandı</ThemedText>
+					<ThemedText style={styles.sectionHint}>Personel görevi tamamladı ve onay bekliyor.</ThemedText>
+					<ThemedText style={styles.fieldLabel}>Personelin Yüklediği Görseller</ThemedText>
+					<ThumbnailsRow
+						images={risk.afterImages || []}
+						onPress={setViewerImage}
+					/>
+					<ThemedText style={styles.fieldLabel}>Tamamlanma Notu</ThemedText>
+					<ThemedText style={styles.description}>{risk.completionNotes || "-"}</ThemedText>
+
+					{role === "ADMIN" && (
+						<ThemedButton
+							text="Onayla ve Kapat"
+							icon="check"
+							onPress={handleClose}
+							style={{ marginVertical: 12, backgroundColor: theme.green.bg, borderColor: theme.green.fg, borderWidth: 1 }}
+							iconColor={theme.green.fg}
+							textStyle={{ color: theme.green.fg }}
+						/>
+					)}
+				</View>
+			)
+		}
+
+		if (risk.status === "completed") {
+			return (
+				<View style={[styles.card, { backgroundColor: theme.green.bg, borderColor: theme.green.fg, borderWidth: 1 }]}>
+					<ThemedText style={styles.sectionTitle}>Tamamlandı</ThemedText>
+					<ThemedText style={styles.sectionHint}>Bu risk bildirimi tamamlandı ve kapatıldı.</ThemedText>
+					<ThemedText style={styles.fieldLabel}>Çalışma Sonrası Görseller</ThemedText>
+					<ThumbnailsRow
+						images={risk.afterImages || []}
+						onPress={setViewerImage}
+					/>
+					<ThemedText style={styles.fieldLabel}>Açıklama / Not</ThemedText>
+					<ThemedText style={styles.description}>{risk.completionNotes || "-"}</ThemedText>
+				</View>
+			)
+		}
+
+		return <></>
+	}
+
+	//////////////////////////// RENDER ////////////////////////////
+
+	if (!risk) {
+		return (
+			<View style={styles.container}>
+				<CustomHeader title="Risk Detayı" />
+				<View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 12 }}>
+					<ThemedIcon
+						name="alert-circle-outline"
+						size={48}
+					/>
+					<ThemedText>Risk bulunamadı.</ThemedText>
+				</View>
+			</View>
+		)
+	}
+
+	return (
+		<View style={styles.container}>
+			<CustomHeader title="Risk Detayı" />
+
+			<ScrollView
+				style={styles.scroll}
+				contentContainerStyle={styles.content}
+				showsVerticalScrollIndicator={false}
+				keyboardShouldPersistTaps="handled"
+			>
+				<RiskProgressCard status={risk.status} />
+
+				<View style={styles.card}>
+					<View style={styles.headerRow}>
+						<ThemedIcon
+							name="clipboard-text-outline"
+							size={24}
+						/>
+						<ThemedText style={styles.title}>{t(risk.type)}</ThemedText>
+					</View>
+
+					<DetailRow
+						icon="tag-outline"
+						label="Kategori"
+						value={t(risk.category)}
+					/>
+					<DetailRow
+						icon="map-marker-outline"
+						label="Konum"
+						value={t(risk.location)}
+					/>
+					<DetailRow
+						icon="shield-alert-outline"
+						label="Önem"
+						value={t(risk.severity)}
+					/>
+					<DetailRow
+						icon="progress-clock"
+						label="Durum"
+						value={t(risk.status)}
+					/>
+					<DetailRow
+						icon="calendar-outline"
+						label="Oluşturulma"
+						value={safeTimestampToDateString(risk.createdAt)}
+					/>
+
+					<View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6, marginBottom: 5 }}>
+						<ThemedIcon
+							name="information-outline"
+							size={20}
+							style={{ marginTop: 8 }}
+						/>
+						<ThemedText style={styles.fieldLabel}>Açıklama</ThemedText>
+					</View>
+					<ThemedText style={styles.description}>{risk.description || "-"}</ThemedText>
+
+					{risk.images.length > 0 && (
+						<View style={styles.section}>
+							<ThemedText style={styles.sectionTitle}>Görseller</ThemedText>
+							<ThumbnailsRow
+								images={risk.images}
+								onPress={setViewerImage}
+							/>
+						</View>
+					)}
+				</View>
+
+				<RenderRoleSection />
+
+				{role === "ADMIN" && (
+					<ThemedButton
+						text="Kaydı Sil"
+						icon="trash-can-outline"
+						onPress={() => {
+							deleteRiskById(risk.id)
+							navigation.goBack()
+						}}
+						style={{
+							marginVertical: 12,
+							backgroundColor: theme.red.bg,
+							borderColor: theme.red.fg,
+							borderWidth: 1,
+						}}
+						iconColor={theme.red.fg}
+						textStyle={{ color: theme.red.fg }}
+					/>
+				)}
+			</ScrollView>
+
+			<ThemedBottomSheet
+				ref={sheetRef}
+				snapPoints={["40%"]}
+				items={sheetItems}
+			/>
+
+			<FullScreenModal
+				visible={viewerImage !== null}
+				image={viewerImage}
+				onClose={() => setViewerImage(null)}
+			/>
+		</View>
+	)
+}
+
+const createStyles = (darkMode: boolean) => {
+	const theme = Theme[darkMode ? "dark" : "light"]
+
+	return StyleSheet.create({
+		container: {
+			flex: 1,
+			backgroundColor: theme.background,
+		},
+		scroll: {
+			flex: 1,
+		},
+		content: {
+			padding: 16,
+			paddingTop: 20,
+			paddingBottom: 32,
+			gap: 14,
+		},
+		card: {
+			borderRadius: 16,
+			padding: 16,
+			gap: 10,
+			backgroundColor: theme.cardBackground,
+		},
+		headerRow: {
+			flexDirection: "row",
+			alignItems: "center",
+			gap: 10,
+			marginBottom: 4,
+		},
+		title: {
+			fontSize: 20,
+			fontWeight: "800",
+			flex: 1,
+		},
+		detailRow: {
+			flexDirection: "row",
+			alignItems: "center",
+			gap: 8,
+		},
+		detailLabel: {
+			fontSize: 14,
+			opacity: 0.6,
+			width: 90,
+		},
+		detailValue: {
+			fontSize: 14,
+			fontWeight: "600",
+			flex: 1,
+		},
+		description: {
+			fontSize: 14,
+			lineHeight: 20,
+			opacity: 0.9,
+		},
+		section: {
+			gap: 8,
+			marginHorizontal: 5,
+		},
+		sectionTitle: {
+			fontSize: 17,
+			fontWeight: "700",
+		},
+		sectionHint: {
+			fontSize: 14,
+			opacity: 0.7,
+		},
+		fieldContainer: {
+			width: "100%",
+			gap: 6,
+		},
+		fieldLabel: {
+			fontSize: 15,
+			fontWeight: "900",
+			opacity: 0.8,
+			marginTop: 8,
+		},
+		selectField: {
+			flexDirection: "row",
+			alignItems: "center",
+			justifyContent: "space-between",
+			borderWidth: 1,
+			borderColor: theme.border,
+			borderRadius: 12,
+			paddingHorizontal: 14,
+			paddingVertical: 12,
+			backgroundColor: darkMode ? "#000" : "#fff",
+		},
+		selectValue: {
+			fontSize: 16,
+			flex: 1,
+		},
+		selectPlaceholder: {
+			opacity: 0.5,
+		},
+		input: {
+			borderWidth: 1,
+			borderColor: theme.border,
+			borderRadius: 12,
+			paddingHorizontal: 14,
+			paddingVertical: 12,
+			fontSize: 16,
+			color: darkMode ? "#fff" : "#000",
+			backgroundColor: darkMode ? "#000" : "#fff",
+		},
+		imageButtonsRow: {
+			flexDirection: "row",
+			gap: 12,
+		},
+		imageButton: {
+			flex: 1,
+			paddingVertical: 12,
+			paddingHorizontal: 10,
+		},
+		imageList: {
+			flexDirection: "row",
+			paddingVertical: 4,
+		},
+		thumbWrap: {
+			marginRight: 12,
+		},
+		thumbnail: {
+			width: 96,
+			height: 96,
+			borderRadius: 12,
+			backgroundColor: darkMode ? "#2a2a2a" : "#e2e2e2",
+		},
+		thumbRemove: {
+			position: "absolute",
+			top: -6,
+			right: -6,
+			width: 24,
+			height: 24,
+			borderRadius: 12,
+			alignItems: "center",
+			justifyContent: "center",
+			backgroundColor: theme.red.fg,
+			borderWidth: 2,
+			borderColor: darkMode ? "#000" : "#fff",
+		},
+		textArea: {
+			borderWidth: 1,
+			borderColor: theme.border,
+			borderRadius: 12,
+			paddingHorizontal: 14,
+			paddingVertical: 12,
+			fontSize: 16,
+			minHeight: 100,
+			color: darkMode ? "#fff" : "#000",
+			backgroundColor: darkMode ? "#000" : "#fff",
+		},
+		errorText: {
+			fontSize: 12,
+			color: theme.red.fg,
+		},
+		secondaryButton: {
+			backgroundColor: darkMode ? "#1c1c1c" : "#f2f2f2",
+		},
+		timeline: {
+			marginTop: 6,
+		},
+		timelineItem: {
+			flexDirection: "row",
+		},
+		timelineRail: {
+			alignItems: "center",
+			width: 30,
+		},
+		timelineDot: {
+			width: 35,
+			height: 35,
+			borderRadius: 99,
+			alignItems: "center",
+			justifyContent: "center",
+			borderWidth: 1,
+			borderColor: theme.border,
+			backgroundColor: darkMode ? "#1d1d1d" : "#e2e2e2",
+		},
+		timelineDotInactive: {
+			opacity: 0.35,
+		},
+		timelineLine: {
+			width: 2,
+			flex: 1,
+			marginVertical: 4,
+			borderRadius: 2,
+		},
+		timelineLineInactive: {
+			opacity: 0.35,
+		},
+		timelineContent: {
+			flex: 1,
+			marginLeft: 14,
+			paddingBottom: 22,
+		},
+		timelineContentInactive: {
+			opacity: 0.3,
+		},
+		timelineTitle: {
+			fontSize: 15,
+			fontWeight: "800",
+		},
+		timelineDesc: {
+			fontSize: 13,
+			opacity: 0.7,
+			lineHeight: 18,
+			marginTop: 2,
+		},
+	})
+}
